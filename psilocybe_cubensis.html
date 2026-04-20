@@ -1,0 +1,1305 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Psilocybe cubensis — Ciclo de vida</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #030308; }
+    #app { width: 100vw; height: 100vh; position: relative; }
+  </style>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+  <div id="app"></div>
+  <script type="module">
+import * as THREE from 'three';
+import { EffectComposer }  from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass }      from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass }      from 'three/addons/postprocessing/OutputPass.js';
+import { OrbitControls }   from 'three/addons/controls/OrbitControls.js';
+
+class Grid3D {
+  constructor(cs) {
+    this.cs = cs;
+    this.cells = new Map();
+  }
+  _hash(x, y, z) {
+    const ix = Math.floor(x / this.cs) + 50;
+    const iy = Math.floor(y / this.cs) + 50;
+    const iz = Math.floor(z / this.cs) + 50;
+    return ix + iy * 100 + iz * 10000;
+  }
+  insert(idx, x, y, z) {
+    const k = this._hash(x, y, z);
+    let arr = this.cells.get(k);
+    if (!arr) { arr = []; this.cells.set(k, arr); }
+    arr.push(idx);
+  }
+  queryRadius(qx, qy, qz, radius, nodes) {
+    const r2 = radius * radius;
+    const cs = this.cs;
+    const out = [];
+    const cxMin = Math.floor((qx - radius) / cs);
+    const cxMax = Math.floor((qx + radius) / cs);
+    const cyMin = Math.floor((qy - radius) / cs);
+    const cyMax = Math.floor((qy + radius) / cs);
+    const czMin = Math.floor((qz - radius) / cs);
+    const czMax = Math.floor((qz + radius) / cs);
+    for (let cz = czMin; cz <= czMax; cz++) {
+      for (let cy = cyMin; cy <= cyMax; cy++) {
+        for (let cx = cxMin; cx <= cxMax; cx++) {
+          const k = (cx + 50) + (cy + 50) * 100 + (cz + 50) * 10000;
+          const arr = this.cells.get(k);
+          if (!arr) continue;
+          for (const ni of arr) {
+            const n = nodes[ni];
+            const dx = n.x - qx, dy = n.y - qy, dz = n.z - qz;
+            if (dx * dx + dy * dy + dz * dz <= r2) out.push(ni);
+          }
+        }
+      }
+    }
+    return out;
+  }
+}
+
+const SEGMENT_LEN     = 0.45;
+const ATTRACT_DIST    = 4.5;
+const KILL_DIST       = 0.45;
+const ATTRACTOR_COUNT = 10000;
+const JITTER          = 0.08;
+const NOISE_WEIGHT    = 0.22;
+const CANALIZE_INCR   = 0.018;
+const ITERS_PER_FRAME = 6;
+const BASE_THICK      = 0.008;
+const GRID_CELL       = ATTRACT_DIST;
+const REFILL_INTERVAL = 40;
+const REFILL_COUNT    = 1200;
+const MAX_NODES       = 40000;
+const VOLUME_RADIUS   = 16;
+const VOLUME_DEPTH    = 12;
+
+class Mycelium {
+  constructor(scene) {
+    this.scene = scene;
+    this.nodes = [];
+    this.attractors = [];
+    this.grid = new Grid3D(GRID_CELL);
+    this.activeAttractors = 0;
+    this.frameCnt = 0;
+    this.prevNodeCount = 0;
+    this.geometryDirty = true;
+    this.wavefrontRadius = -1;
+    this.wavefrontIntensity = 1;
+    this.started = false;
+
+    this.infDx  = new Float64Array(1024);
+    this.infDy  = new Float64Array(1024);
+    this.infDz  = new Float64Array(1024);
+    this.infCnt = new Uint16Array(1024);
+
+    let seed = 12345;
+    this.rng = () => { seed = (seed * 16807) % 2147483647; return (seed - 1) / 2147483646; };
+
+    const maxSegs = MAX_NODES;
+    const lp = new Float32Array(maxSegs * 6);
+    const lc = new Float32Array(maxSegs * 6);
+    this.lineGeo = new THREE.BufferGeometry();
+    this.linePosAttr = new THREE.BufferAttribute(lp, 3);
+    this.lineColAttr = new THREE.BufferAttribute(lc, 3);
+    this.linePosAttr.setUsage(THREE.DynamicDrawUsage);
+    this.lineColAttr.setUsage(THREE.DynamicDrawUsage);
+    this.lineGeo.setAttribute('position', this.linePosAttr);
+    this.lineGeo.setAttribute('color', this.lineColAttr);
+    this.lineGeo.setDrawRange(0, 0);
+    this.lineMat = new THREE.LineBasicMaterial({
+      vertexColors: true, transparent: true, opacity: 0,
+      blending: THREE.AdditiveBlending, depthWrite: false,
+    });
+    this.lines = new THREE.LineSegments(this.lineGeo, this.lineMat);
+    scene.add(this.lines);
+
+    const maxTips = 2000;
+    const tp = new Float32Array(maxTips * 3);
+    const tc = new Float32Array(maxTips * 3);
+    this.tipGeo = new THREE.BufferGeometry();
+    this.tipPosAttr = new THREE.BufferAttribute(tp, 3);
+    this.tipColAttr = new THREE.BufferAttribute(tc, 3);
+    this.tipPosAttr.setUsage(THREE.DynamicDrawUsage);
+    this.tipColAttr.setUsage(THREE.DynamicDrawUsage);
+    this.tipGeo.setAttribute('position', this.tipPosAttr);
+    this.tipGeo.setAttribute('color', this.tipColAttr);
+    this.tipGeo.setDrawRange(0, 0);
+
+    const canvas = document.createElement('canvas');
+    canvas.width = 32; canvas.height = 32;
+    const ctx2d = canvas.getContext('2d');
+    const grad = ctx2d.createRadialGradient(16, 16, 0, 16, 16, 16);
+    grad.addColorStop(0, 'rgba(255,255,255,1)');
+    grad.addColorStop(0.3, 'rgba(255,255,255,0.7)');
+    grad.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx2d.fillStyle = grad;
+    ctx2d.fillRect(0, 0, 32, 32);
+    const circTex = new THREE.CanvasTexture(canvas);
+
+    this.tipMat = new THREE.PointsMaterial({
+      size: 0.32, map: circTex, vertexColors: true,
+      transparent: true, opacity: 0,
+      blending: THREE.AdditiveBlending, depthWrite: false, sizeAttenuation: true,
+    });
+    this.tips = new THREE.Points(this.tipGeo, this.tipMat);
+    scene.add(this.tips);
+  }
+
+  start() {
+    if (this.started) return;
+    this.started = true;
+    this._addNode(0, 0, 0, -1);
+    this._scatterAttractors();
+    this.grid.insert(0, 0, 0, 0);
+    this.prevNodeCount = 1;
+  }
+
+  update(intensity, time) {
+    if (!this.started) return;
+    if (this.frameCnt > 0 && this.frameCnt % REFILL_INTERVAL === 0 && this.activeAttractors < 3000) {
+      this._refillAttractors();
+    }
+    if (this.activeAttractors > 0) {
+      const iters = Math.max(1, Math.round(ITERS_PER_FRAME * intensity));
+      for (let i = 0; i < iters; i++) {
+        if (this.activeAttractors <= 0) break;
+        this._scaStep();
+      }
+    }
+    this.frameCnt++;
+    if (this.frameCnt % 12 === 0) { this._canalize(); this.geometryDirty = true; }
+    if (this.geometryDirty || this.frameCnt % 3 === 0) { this._buildLineData(time); this.geometryDirty = false; }
+    if (this.frameCnt % 4 === 0) this._updateTips(time);
+  }
+
+  getNodeCount() { return this.nodes.length; }
+
+  setOpacity(t) {
+    const v = Math.min(1, Math.max(0, t));
+    this.lineMat.opacity = v * 0.92;
+    this.tipMat.opacity  = v * 0.85;
+  }
+
+  setWavefront(r, intensity = 1) {
+    this.wavefrontRadius = r;
+    this.wavefrontIntensity = intensity;
+  }
+
+  dispose() {
+    this.lineGeo.dispose(); this.lineMat.dispose(); this.scene.remove(this.lines);
+    this.tipGeo.dispose();  this.tipMat.dispose();  this.scene.remove(this.tips);
+  }
+
+  _scatterAttractors() {
+    const rng = this.rng;
+    for (let i = 0; i < ATTRACTOR_COUNT; i++) {
+      let x, y, z;
+      if (i < ATTRACTOR_COUNT * 0.10) {
+        x = (rng() - 0.5) * 6; y = -rng() * 5; z = (rng() - 0.5) * 6;
+      } else if (i < ATTRACTOR_COUNT * 0.30) {
+        const theta = rng() * Math.PI * 2;
+        const phi   = rng() * Math.PI * 0.75 + Math.PI * 0.15;
+        const r     = rng() * VOLUME_RADIUS * 0.7;
+        x = r * Math.sin(phi) * Math.cos(theta);
+        y = -Math.abs(r * Math.cos(phi) * 0.7) - 0.3;
+        z = r * Math.sin(phi) * Math.sin(theta);
+      } else {
+        const theta = rng() * Math.PI * 2;
+        const r     = Math.sqrt(rng()) * VOLUME_RADIUS;
+        x = r * Math.cos(theta); y = -rng() * VOLUME_DEPTH; z = r * Math.sin(theta);
+      }
+      this.attractors.push({ x, y, z, active: true });
+    }
+    this.activeAttractors = this.attractors.length;
+  }
+
+  _refillAttractors() {
+    const rng = this.rng;
+    let added = 0;
+    for (let i = 0; i < REFILL_COUNT; i++) {
+      const theta = rng() * Math.PI * 2;
+      const r = Math.sqrt(rng()) * VOLUME_RADIUS;
+      const x = r * Math.cos(theta), y = -rng() * VOLUME_DEPTH, z = r * Math.sin(theta);
+      const nearby = this.grid.queryRadius(x, y, z, KILL_DIST * 3, this.nodes);
+      if (nearby.length === 0) { this.attractors.push({ x, y, z, active: true }); added++; }
+    }
+    this.activeAttractors += added;
+  }
+
+  _ensureInfArrays(len) {
+    if (this.infDx.length < len) {
+      const size = Math.max(len, this.infDx.length * 2);
+      this.infDx  = new Float64Array(size);
+      this.infDy  = new Float64Array(size);
+      this.infDz  = new Float64Array(size);
+      this.infCnt = new Uint16Array(size);
+    }
+  }
+
+  _scaStep() {
+    const rng = this.rng;
+    for (let i = this.prevNodeCount; i < this.nodes.length; i++) {
+      const n = this.nodes[i]; this.grid.insert(i, n.x, n.y, n.z);
+    }
+    this.prevNodeCount = this.nodes.length;
+    const len = this.nodes.length;
+    this._ensureInfArrays(len);
+    this.infDx.fill(0, 0, len); this.infDy.fill(0, 0, len);
+    this.infDz.fill(0, 0, len); this.infCnt.fill(0, 0, len);
+
+    for (let ai = 0; ai < this.attractors.length; ai++) {
+      const a = this.attractors[ai];
+      if (!a.active) continue;
+      const nearby = this.grid.queryRadius(a.x, a.y, a.z, ATTRACT_DIST, this.nodes);
+      if (nearby.length === 0) continue;
+      let bestIdx = -1, bestD2 = Infinity;
+      for (const ni of nearby) {
+        const n = this.nodes[ni];
+        const dx = n.x - a.x, dy = n.y - a.y, dz = n.z - a.z;
+        const d2 = dx * dx + dy * dy + dz * dz;
+        if (d2 < bestD2) { bestD2 = d2; bestIdx = ni; }
+      }
+      if (bestIdx < 0) continue;
+      if (bestD2 < KILL_DIST * KILL_DIST) { a.active = false; this.activeAttractors--; continue; }
+      const n = this.nodes[bestIdx];
+      const dx = a.x - n.x, dy = a.y - n.y, dz = a.z - n.z;
+      const d = Math.sqrt(dx * dx + dy * dy + dz * dz) || 1;
+      this.infDx[bestIdx] += dx / d; this.infDy[bestIdx] += dy / d; this.infDz[bestIdx] += dz / d;
+      this.infCnt[bestIdx] += 1;
+    }
+
+    const beforeLen = this.nodes.length;
+    for (let ni = 0; ni < beforeLen; ni++) {
+      if (this.infCnt[ni] === 0) continue;
+      if (this.nodes.length >= MAX_NODES) return;
+      const n = this.nodes[ni];
+      let dx = this.infDx[ni] / this.infCnt[ni];
+      let dy = this.infDy[ni] / this.infCnt[ni];
+      let dz = this.infDz[ni] / this.infCnt[ni];
+      dx += Math.sin(n.noiseOff * 3.7) * 0.5 * NOISE_WEIGHT;
+      dz += Math.cos(n.noiseOff * 2.3 + 1.7) * 0.5 * NOISE_WEIGHT;
+      dy += Math.sin(n.noiseOff * 1.9 - 0.5) * 0.3 * NOISE_WEIGHT;
+      dx += (rng() - 0.5) * JITTER * 2;
+      dy += (rng() - 0.5) * JITTER * 2;
+      dz += (rng() - 0.5) * JITTER * 2;
+      dy -= 0.02;
+      const mag = Math.sqrt(dx * dx + dy * dy + dz * dz) || 1;
+      dx /= mag; dy /= mag; dz /= mag;
+      const nx = n.x + dx * SEGMENT_LEN;
+      const ny = n.y + dy * SEGMENT_LEN;
+      const nz = n.z + dz * SEGMENT_LEN;
+      if (nx * nx + nz * nz > VOLUME_RADIUS * VOLUME_RADIUS) continue;
+      if (ny > -0.3 || ny < -VOLUME_DEPTH) continue;
+      this._addNode(nx, ny, nz, ni);
+    }
+    this.geometryDirty = true;
+  }
+
+  _addNode(x, y, z, parent) {
+    const idx = this.nodes.length;
+    this.nodes.push({
+      x, y, z, parent, children: [], isTip: true, thickness: 0,
+      noiseOff: parent >= 0
+        ? this.nodes[parent].noiseOff + this.rng() * 0.15 + 0.05
+        : this.rng() * 10000,
+    });
+    if (parent >= 0) { this.nodes[parent].isTip = false; this.nodes[parent].children.push(idx); }
+    return idx;
+  }
+
+  _canalize() {
+    for (const n of this.nodes) n.thickness = 0;
+    for (let i = 0; i < this.nodes.length; i++) {
+      if (!this.nodes[i].isTip) continue;
+      let ci = i;
+      while (true) {
+        const c = this.nodes[ci];
+        if (c.parent < 0) break;
+        const p = this.nodes[c.parent];
+        const proposed = c.thickness + CANALIZE_INCR;
+        if (p.thickness >= proposed) break;
+        p.thickness = proposed;
+        ci = c.parent;
+      }
+    }
+  }
+
+  _buildLineData(time) {
+    const pos = this.linePosAttr.array;
+    const col = this.lineColAttr.array;
+    let si = 0;
+    for (let i = 0; i < this.nodes.length; i++) {
+      const n = this.nodes[i];
+      if (n.parent < 0) continue;
+      if (si >= MAX_NODES) break;
+      const par = this.nodes[n.parent];
+      const thick = BASE_THICK + n.thickness;
+      const idx6 = si * 6;
+      pos[idx6]   = par.x; pos[idx6+1] = par.y; pos[idx6+2] = par.z;
+      pos[idx6+3] = n.x;   pos[idx6+4] = n.y;   pos[idx6+5] = n.z;
+      const brightness = Math.min(1.0, 0.12 + thick * 4.0);
+      const dist = Math.sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
+      const pulse = 0.5 + 0.5 * Math.sin(time * 1.2 - dist * 0.35);
+      const wave  = 0.7 + 0.3 * pulse;
+      let waveGlow = 0;
+      if (this.wavefrontRadius > 0) {
+        const d = Math.abs(dist - this.wavefrontRadius);
+        const band = 2.5;
+        if (d < band) waveGlow = (1 - d / band) * (1 - d / band) * this.wavefrontIntensity;
+      }
+      const adj = brightness * wave + waveGlow * 1.5;
+      const r = adj * 0.06 + waveGlow * 0.15;
+      const g = adj * 0.30 + waveGlow * 0.5;
+      const b = adj * 0.95 + waveGlow * 0.8;
+      col[idx6]   = r; col[idx6+1] = g; col[idx6+2] = b;
+      col[idx6+3] = r; col[idx6+4] = g; col[idx6+5] = b;
+      si++;
+    }
+    this.lineGeo.setDrawRange(0, si * 2);
+    this.linePosAttr.needsUpdate = true;
+    this.lineColAttr.needsUpdate = true;
+  }
+
+  _updateTips(time) {
+    const pos = this.tipPosAttr.array;
+    const col = this.tipColAttr.array;
+    let ti = 0;
+    for (let i = 0; i < this.nodes.length && ti < 2000; i++) {
+      const n = this.nodes[i];
+      if (!n.isTip) continue;
+      const i3 = ti * 3;
+      pos[i3] = n.x; pos[i3+1] = n.y; pos[i3+2] = n.z;
+      const pulse = 0.6 + 0.4 * Math.sin(time * 2.5 + n.noiseOff * 3);
+      col[i3] = 0.15 * pulse; col[i3+1] = 0.65 * pulse; col[i3+2] = 1.0 * pulse;
+      ti++;
+    }
+    this.tipGeo.setDrawRange(0, ti);
+    this.tipPosAttr.needsUpdate = true;
+    this.tipColAttr.needsUpdate = true;
+  }
+}
+
+function lerp(a, b, t) { return a + (b - a) * t; }
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+function smoothstep(a, b, x) { const t = clamp((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); }
+
+const MAX_STEM_H      = 8;
+const MAX_STEM_R_BASE = 0.55;
+const MAX_STEM_R_TOP  = 0.38;
+const MAX_CAP_R       = 3.2;
+const MAX_CAP_DOME    = 2.0;
+
+function makeBodyTexture() {
+  const W = 512, H = 1024;
+  const c = document.createElement('canvas'); c.width = W; c.height = H;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#f0e8da'; ctx.fillRect(0, 0, W, H);
+  for (let i = 0; i < 600; i++) {
+    const x = Math.random() * W, y = Math.random() * H * 0.55;
+    const len = 30 + Math.random() * 100;
+    ctx.globalAlpha = 0.12 + Math.random() * 0.15;
+    ctx.strokeStyle = Math.random() > 0.5 ? '#c0a070' : '#9a7850';
+    ctx.lineWidth = 0.5 + Math.random() * 1.5;
+    ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + (Math.random() - 0.5) * 4, y + len); ctx.stroke();
+  }
+  for (let i = 0; i < 500; i++) {
+    const x = Math.random() * W, y = H * 0.5 + Math.random() * H * 0.5;
+    const len = 15 + Math.random() * 60;
+    const angle = (Math.random() - 0.5) * 0.35;
+    ctx.globalAlpha = 0.1 + Math.random() * 0.12;
+    ctx.strokeStyle = Math.random() > 0.4 ? '#b08040' : '#d0b888';
+    ctx.lineWidth = 0.8 + Math.random() * 2.0;
+    ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + Math.sin(angle) * len, y + Math.cos(angle) * len); ctx.stroke();
+  }
+  for (let i = 0; i < 150; i++) {
+    const x = Math.random() * W, y = Math.random() * H, r = 2 + Math.random() * 6;
+    ctx.globalAlpha = 0.08 + Math.random() * 0.1;
+    ctx.fillStyle = Math.random() > 0.5 ? '#a08050' : '#8a6838';
+    ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+  }
+  for (let i = 0; i < 35; i++) {
+    const x = Math.random() * W, y = Math.random() * H * 0.55, r = 3 + Math.random() * 10;
+    ctx.globalAlpha = 0.08 + Math.random() * 0.1;
+    ctx.fillStyle = '#3355aa';
+    ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  const tex = new THREE.CanvasTexture(c);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  return tex;
+}
+
+function makeBumpTexture() {
+  const W = 512, H = 1024;
+  const c = document.createElement('canvas'); c.width = W; c.height = H;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#808080'; ctx.fillRect(0, 0, W, H);
+  const imgData = ctx.getImageData(0, 0, W, H);
+  const d = imgData.data;
+  for (let i = 0; i < d.length; i += 4) {
+    const noise = (Math.random() - 0.5) * 70;
+    d[i] += noise; d[i+1] += noise; d[i+2] += noise;
+  }
+  ctx.putImageData(imgData, 0, 0);
+  for (let i = 0; i < 200; i++) {
+    const x = Math.random() * W, y = Math.random() * H, r = 3 + Math.random() * 12;
+    ctx.globalAlpha = 0.15 + Math.random() * 0.15;
+    ctx.fillStyle = Math.random() > 0.5 ? '#c0c0c0' : '#404040';
+    ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+  }
+  for (let i = 0; i < 300; i++) {
+    const x = Math.random() * W, y = Math.random() * H * 0.55;
+    const len = 20 + Math.random() * 70;
+    ctx.globalAlpha = 0.12 + Math.random() * 0.12;
+    ctx.strokeStyle = Math.random() > 0.5 ? '#b0b0b0' : '#505050';
+    ctx.lineWidth = 0.8 + Math.random() * 1.5;
+    ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + (Math.random() - 0.5) * 3, y + len); ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+  const tex = new THREE.CanvasTexture(c);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  return tex;
+}
+
+class Mushroom {
+  constructor(scene) {
+    this.scene = scene;
+    this.currentT = -1;
+    this.meshes = [];
+    this.bodyMat = null;
+    this.group = new THREE.Group();
+    this.group.visible = false;
+    scene.add(this.group);
+    this.bodyTex = makeBodyTexture();
+    this.bumpTex = makeBumpTexture();
+  }
+
+  setGrowth(t, time) {
+    if (t <= 0) { this.group.visible = false; return; }
+    this.group.visible = true;
+    if (Math.abs(t - this.currentT) > 0.004 || this.currentT < 0) {
+      this._rebuild(t); this.currentT = t;
+    }
+    this.group.rotation.z = Math.sin(time * 0.3) * 0.012;
+  }
+
+  dispose() {
+    this._clearMeshes(); this.bodyMat = null;
+    this.scene.remove(this.group);
+    this.bodyTex.dispose(); this.bumpTex.dispose();
+  }
+
+  _rebuild(t) {
+    this._clearMeshes();
+    const stemT   = smoothstep(0, 0.55, t);
+    const widenT  = smoothstep(0, 0.50, t);
+    const capT    = smoothstep(0.10, 0.85, t);
+    const openT   = smoothstep(0.25, 0.70, t);
+    const matureT = smoothstep(0.75, 1.0, t);
+
+    const stemH     = lerp(0.3, MAX_STEM_H, stemT);
+    const stemRBase = lerp(0.08, MAX_STEM_R_BASE, widenT);
+    const stemRTop  = lerp(0.06, MAX_STEM_R_TOP, widenT);
+    const capR      = MAX_CAP_R * capT * lerp(0.15, 1, openT);
+    const conicF    = lerp(1.5, 0.55, openT);
+    const capDome   = MAX_CAP_DOME * capT * conicF;
+    const hasCapGeometry = capR > stemRTop * 1.1;
+
+    const SEGS = 48, LATHE_SEGS = 20;
+    const pts = [];
+
+    if (hasCapGeometry) {
+      const stipeEnd = 0.50, shoulderW = 0.10;
+      for (let i = 0; i <= SEGS; i++) {
+        const f = i / SEGS;
+        let r, y;
+        if (f <= stipeEnd - shoulderW) {
+          const sf = f / (stipeEnd - shoulderW);
+          r = lerp(stemRBase * 1.08, stemRTop, sf);
+          if (sf < 0.08) r *= lerp(1.12, 1.0, sf / 0.08);
+          r *= 1 + Math.sin(sf * 8.5 + 1.3) * 0.015;
+          y = sf * stemH;
+        } else if (f <= stipeEnd + shoulderW) {
+          const blendF = (f - (stipeEnd - shoulderW)) / (shoulderW * 2);
+          const sm = blendF * blendF * (3 - 2 * blendF);
+          r = lerp(stemRTop, capR, sm);
+          y = stemH + sm * capDome * 0.03;
+        } else {
+          const cf = (f - stipeEnd - shoulderW) / (1 - stipeEnd - shoulderW);
+          const angle = cf * Math.PI * 0.5;
+          r = capR * Math.cos(angle);
+          y = stemH + capDome * Math.sin(angle);
+          const umboStr = smoothstep(0.45, 0.80, t) * 0.15;
+          if (cf > 0.85 && umboStr > 0) y += (cf - 0.85) / 0.15 * umboStr * capDome;
+        }
+        pts.push(new THREE.Vector2(Math.max(r, 0.001), y));
+      }
+    } else {
+      for (let i = 0; i <= SEGS; i++) {
+        const f = i / SEGS;
+        let r, y;
+        if (f < 0.85) {
+          const sf = f / 0.85;
+          r = lerp(stemRBase * 1.08, stemRTop, sf);
+          if (sf < 0.08) r *= lerp(1.10, 1.0, sf / 0.08);
+          r *= 1 + Math.sin(sf * 8.5 + 1.3) * 0.015;
+          y = sf * stemH;
+        } else {
+          const cf = (f - 0.85) / 0.15;
+          const angle = cf * Math.PI * 0.5;
+          r = stemRTop * Math.cos(angle);
+          y = stemH + stemRTop * 0.5 * Math.sin(angle);
+        }
+        pts.push(new THREE.Vector2(Math.max(r, 0.001), y));
+      }
+    }
+
+    const geo = new THREE.LatheGeometry(pts, LATHE_SEGS);
+    const vc = new Float32Array(geo.attributes.position.count * 3);
+    const pa = geo.attributes.position;
+    const colorAge = smoothstep(0.25, 0.90, t);
+    const stipeAge = smoothstep(0.40, 0.90, t);
+
+    for (let i = 0; i < pa.count; i++) {
+      const px = pa.getX(i), py = pa.getY(i), pz = pa.getZ(i);
+      const radial = Math.sqrt(px * px + pz * pz);
+      if (py <= stemH * 1.02) {
+        const baseFade = stemH > 0.1 ? 1 - clamp(py / stemH, 0, 1) : 0;
+        const baseColor = stipeAge * baseFade * baseFade;
+        vc[i*3]   = lerp(1.0,  0.78, baseColor * 0.7);
+        vc[i*3+1] = lerp(0.97, 0.42, baseColor * 0.7);
+        vc[i*3+2] = lerp(0.93, 0.12, baseColor * 0.7);
+      } else {
+        const d = capR > 0.01 ? clamp(radial / capR, 0, 1) : 0;
+        const edgeFade = d * d;
+        const agingHere = colorAge * clamp(1.0 - edgeFade * 1.5, 0, 1);
+        vc[i*3]   = lerp(1.0,  0.78, agingHere);
+        vc[i*3+1] = lerp(0.97, 0.42, agingHere);
+        vc[i*3+2] = lerp(0.90, 0.12, agingHere);
+      }
+    }
+    geo.setAttribute('color', new THREE.BufferAttribute(vc, 3));
+
+    const mat = new THREE.MeshStandardMaterial({
+      vertexColors: true, roughness: 0.7, metalness: 0.0, side: THREE.DoubleSide,
+      map: this.bodyTex, bumpMap: this.bumpTex, bumpScale: 0.35,
+    });
+    this.bodyMat = mat;
+    this._addMesh(new THREE.Mesh(geo, mat));
+
+    if (capT > 0.2 && capR > 0.4) {
+      const gillVis = smoothstep(0.30, 0.50, t);
+      const gillR = capR * 0.97 * gillVis;
+      const gillInner = stemRTop * 0.9;
+      if (gillR > gillInner + 0.1) {
+        const bgGeo = new THREE.RingGeometry(gillInner, gillR * 0.95, 48, 1);
+        bgGeo.rotateX(-Math.PI * 0.5);
+        const shadowC = lerp(0.18, 0.10, matureT);
+        const bgMat = new THREE.MeshStandardMaterial({
+          color: new THREE.Color(shadowC, shadowC * 0.78, shadowC * 0.65),
+          roughness: 0.95, side: THREE.BackSide,
+        });
+        const bgMesh = new THREE.Mesh(bgGeo, bgMat);
+        bgMesh.position.y = stemH - 0.01;
+        this._addMesh(bgMesh);
+
+        const nBlades = Math.floor(lerp(56, 96, gillVis));
+        const maxBladeDepth = capDome * lerp(0.04, 0.09, matureT);
+        const bladeOuterR = gillR * 0.95;
+        const yTop = stemH + 0.01;
+        const positions = [], colors = [], norms = [], radSegs = 3;
+        for (let g = 0; g < nBlades; g++) {
+          const a = (g / nBlades) * Math.PI * 2;
+          const ca = Math.cos(a), sa = Math.sin(a);
+          const nx = -sa, nz = ca;
+          for (let s = 0; s < radSegs; s++) {
+            const f0 = s / radSegs, f1 = (s + 1) / radSegs;
+            const r0 = lerp(gillInner, bladeOuterR, f0);
+            const r1 = lerp(gillInner, bladeOuterR, f1);
+            const x0 = ca * r0, z0 = sa * r0, x1 = ca * r1, z1 = sa * r1;
+            const d0 = maxBladeDepth * (1 - f0 * f0);
+            const d1 = maxBladeDepth * (1 - f1 * f1);
+            const yBot0 = yTop - d0, yBot1 = yTop - d1;
+            positions.push(x0, yTop, z0, x1, yTop, z1, x1, yBot1, z1);
+            norms.push(nx, 0, nz, nx, 0, nz, nx, 0, nz);
+            positions.push(x0, yTop, z0, x1, yBot1, z1, x0, yBot0, z0);
+            norms.push(nx, 0, nz, nx, 0, nz, nx, 0, nz);
+            const ci = lerp(0.60, 0.45, matureT) * lerp(1.0, 0.82, f0);
+            const co = lerp(0.60, 0.45, matureT) * lerp(1.0, 0.82, f1);
+            colors.push(ci, ci*0.84, ci*0.72, co, co*0.84, co*0.72, co*0.90, co*0.76, co*0.64);
+            colors.push(ci, ci*0.84, ci*0.72, co*0.90, co*0.76, co*0.64, ci*0.92, ci*0.78, ci*0.66);
+          }
+        }
+        const gillGeo = new THREE.BufferGeometry();
+        gillGeo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+        gillGeo.setAttribute('color',    new THREE.Float32BufferAttribute(colors, 3));
+        gillGeo.setAttribute('normal',   new THREE.Float32BufferAttribute(norms, 3));
+        const gillMat = new THREE.MeshStandardMaterial({
+          vertexColors: true, roughness: 0.78, metalness: 0.0,
+          side: THREE.DoubleSide, transparent: true, opacity: lerp(0.75, 1.0, gillVis),
+        });
+        this._addMesh(new THREE.Mesh(gillGeo, gillMat));
+      }
+    }
+
+    if (t > 0.45 && stemH > 2) {
+      const annT = smoothstep(0.45, 0.65, t);
+      const annInner = stemRTop * 1.0;
+      const annOuter = stemRTop * lerp(1.5, 2.6, annT);
+      const annGeo = new THREE.RingGeometry(annInner, annOuter, 20, 1);
+      annGeo.rotateX(-Math.PI * 0.5);
+      const annPA = annGeo.attributes.position;
+      for (let i = 0; i < annPA.count; i++) {
+        const ax = annPA.getX(i), az = annPA.getZ(i);
+        const dr = Math.sqrt(ax * ax + az * az);
+        const droopF = clamp((dr - annInner) / (annOuter - annInner), 0, 1);
+        annPA.setY(i, annPA.getY(i) - droopF * droopF * 0.25);
+      }
+      annPA.needsUpdate = true;
+      annGeo.computeVertexNormals();
+      const annMat = new THREE.MeshStandardMaterial({ color: 0x7a6652, roughness: 0.85, side: THREE.DoubleSide });
+      const annMesh = new THREE.Mesh(annGeo, annMat);
+      annMesh.position.y = stemH * 0.82;
+      this._addMesh(annMesh);
+    }
+  }
+
+  _addMesh(obj) { this.group.add(obj); this.meshes.push(obj); }
+
+  _clearMeshes() {
+    for (const obj of this.meshes) {
+      this.group.remove(obj);
+      const m = obj;
+      if (m.geometry) m.geometry.dispose();
+      if (m.material) {
+        if (Array.isArray(m.material)) m.material.forEach(mm => mm.dispose());
+        else m.material.dispose();
+      }
+    }
+    this.meshes = [];
+  }
+}
+
+const PART_COUNT = 500;
+const PART_VOLUME = 55;
+
+class Particles {
+  constructor(scene) {
+    const positions = new Float32Array(PART_COUNT * 3);
+    const colors    = new Float32Array(PART_COUNT * 3);
+    this.velocities = new Float32Array(PART_COUNT * 3);
+    this.seeds      = new Float32Array(PART_COUNT);
+
+    for (let i = 0; i < PART_COUNT; i++) {
+      const i3 = i * 3;
+      positions[i3]   = (Math.random() - 0.5) * PART_VOLUME;
+      positions[i3+1] = (Math.random() - 0.5) * PART_VOLUME;
+      positions[i3+2] = (Math.random() - 0.5) * PART_VOLUME;
+      this.velocities[i3]   = (Math.random() - 0.5) * 0.2;
+      this.velocities[i3+1] = (Math.random() - 0.5) * 0.1;
+      this.velocities[i3+2] = (Math.random() - 0.5) * 0.2;
+      this.seeds[i] = Math.random() * 1000;
+      const t = Math.random();
+      colors[i3]   = 0.03 + t * 0.12;
+      colors[i3+1] = 0.12 + t * 0.30;
+      colors[i3+2] = 0.50 + Math.random() * 0.50;
+    }
+
+    this.geometry = new THREE.BufferGeometry();
+    this.posAttr  = new THREE.BufferAttribute(positions, 3);
+    this.posAttr.setUsage(THREE.DynamicDrawUsage);
+    this.geometry.setAttribute('position', this.posAttr);
+    this.geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+    const canvas = document.createElement('canvas');
+    canvas.width = 32; canvas.height = 32;
+    const ctx2d = canvas.getContext('2d');
+    const grad = ctx2d.createRadialGradient(16,16,0,16,16,16);
+    grad.addColorStop(0, 'rgba(255,255,255,1)');
+    grad.addColorStop(0.4, 'rgba(255,255,255,0.6)');
+    grad.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx2d.fillStyle = grad; ctx2d.fillRect(0, 0, 32, 32);
+    const circTex = new THREE.CanvasTexture(canvas);
+
+    this.points = new THREE.Points(this.geometry, new THREE.PointsMaterial({
+      size: 0.15, map: circTex, vertexColors: true,
+      transparent: true, opacity: 0.6,
+      blending: THREE.AdditiveBlending, depthWrite: false, sizeAttenuation: true,
+    }));
+    scene.add(this.points);
+  }
+
+  update(dt, time) {
+    const pos = this.posAttr.array;
+    const half = PART_VOLUME * 0.5;
+    for (let i = 0; i < PART_COUNT; i++) {
+      const i3 = i * 3;
+      const seed = this.seeds[i];
+      pos[i3]   += this.velocities[i3]   * dt + Math.sin(time * 0.3  + seed)       * 0.003;
+      pos[i3+1] += this.velocities[i3+1] * dt + Math.cos(time * 0.2  + seed * 1.3) * 0.002;
+      pos[i3+2] += this.velocities[i3+2] * dt + Math.sin(time * 0.25 + seed * 0.7) * 0.003;
+      for (let j = 0; j < 3; j++) {
+        if (pos[i3+j] >  half) pos[i3+j] = -half;
+        if (pos[i3+j] < -half) pos[i3+j] =  half;
+      }
+    }
+    this.posAttr.needsUpdate = true;
+  }
+
+  burst(x, y, z) {
+    const pos = this.posAttr.array;
+    for (let i = 0; i < Math.min(40, PART_COUNT); i++) {
+      const i3 = i * 3;
+      pos[i3] = x; pos[i3+1] = y; pos[i3+2] = z;
+      this.velocities[i3]   = (Math.random() - 0.5) * 4;
+      this.velocities[i3+1] = Math.random() * 3;
+      this.velocities[i3+2] = (Math.random() - 0.5) * 4;
+    }
+    this.posAttr.needsUpdate = true;
+  }
+
+  dispose() { this.geometry.dispose(); this.points.material.dispose(); }
+}
+
+const SPORE_COUNT = 800;
+
+class SporeRain {
+  constructor(scene) {
+    this.scene = scene;
+    this.active = false;
+    this.started = false;
+
+    const positions = new Float32Array(SPORE_COUNT * 3);
+    const colors    = new Float32Array(SPORE_COUNT * 3);
+    this.velocities = new Float32Array(SPORE_COUNT * 3);
+    this.ages       = new Float32Array(SPORE_COUNT);
+    this.maxAges    = new Float32Array(SPORE_COUNT);
+
+    for (let i = 0; i < SPORE_COUNT; i++) {
+      const i3 = i * 3;
+      positions[i3] = 0; positions[i3+1] = -100; positions[i3+2] = 0;
+      this.ages[i] = -1;
+      const t = Math.random();
+      colors[i3]   = 0.1 + t * 0.1;
+      colors[i3+1] = 0.3 + t * 0.25;
+      colors[i3+2] = 0.6 + t * 0.35;
+    }
+
+    this.geometry = new THREE.BufferGeometry();
+    this.posAttr  = new THREE.BufferAttribute(positions, 3);
+    this.posAttr.setUsage(THREE.DynamicDrawUsage);
+    this.geometry.setAttribute('position', this.posAttr);
+    this.geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+    const canvas = document.createElement('canvas');
+    canvas.width = 32; canvas.height = 32;
+    const ctx = canvas.getContext('2d');
+    const grad = ctx.createRadialGradient(16,16,0,16,16,16);
+    grad.addColorStop(0,   'rgba(255,255,255,1)');
+    grad.addColorStop(0.3, 'rgba(200,220,255,0.7)');
+    grad.addColorStop(0.6, 'rgba(100,150,255,0.3)');
+    grad.addColorStop(1,   'rgba(50,100,255,0)');
+    ctx.fillStyle = grad; ctx.fillRect(0, 0, 32, 32);
+
+    this.points = new THREE.Points(this.geometry, new THREE.PointsMaterial({
+      size: 0.12, map: new THREE.CanvasTexture(canvas),
+      vertexColors: true, transparent: true, opacity: 0.85,
+      depthWrite: false, sizeAttenuation: true, blending: THREE.AdditiveBlending,
+    }));
+    this.points.visible = false;
+    scene.add(this.points);
+  }
+
+  start() { this.active = true; this.started = true; this.points.visible = true; }
+
+  update(dt, sources) {
+    if (!this.active || sources.length === 0) return;
+    const pos = this.posAttr.array;
+    for (let i = 0; i < SPORE_COUNT; i++) {
+      const i3 = i * 3;
+      if (this.ages[i] < 0) {
+        if (Math.random() < dt * 60) {
+          const src = sources[Math.floor(Math.random() * sources.length)];
+          const angle = Math.random() * Math.PI * 2;
+          const r = (0.3 + Math.random() * 0.65) * src.capR;
+          pos[i3]   = src.x + Math.cos(angle) * r;
+          pos[i3+1] = src.stemH - 0.2 * src.scale;
+          pos[i3+2] = src.z + Math.sin(angle) * r;
+          const spread = 0.15 + Math.random() * 0.4;
+          this.velocities[i3]   = (Math.random() - 0.5) * spread;
+          this.velocities[i3+1] = -(0.3 + Math.random() * 0.5);
+          this.velocities[i3+2] = (Math.random() - 0.5) * spread;
+          this.ages[i] = 0;
+          this.maxAges[i] = 8 + Math.random() * 10;
+        }
+        continue;
+      }
+      this.ages[i] += dt;
+      const drag = Math.max(0.2, 1 - this.ages[i] / this.maxAges[i] * 0.4);
+      const buoyancy = Math.min(1, this.ages[i] / 3) * 0.35;
+      pos[i3]   += this.velocities[i3]   * dt * drag;
+      pos[i3+1] += (this.velocities[i3+1] + buoyancy) * dt * drag;
+      pos[i3+2] += this.velocities[i3+2] * dt * drag;
+      const outward = Math.min(1, this.ages[i] / 2) * 0.02;
+      const dist = Math.sqrt(pos[i3] * pos[i3] + pos[i3+2] * pos[i3+2]);
+      if (dist > 0.1) {
+        pos[i3]   += (pos[i3]   / dist) * outward;
+        pos[i3+2] += (pos[i3+2] / dist) * outward;
+      }
+      const phase = this.ages[i] * 0.8 + i * 0.37;
+      pos[i3]   += Math.sin(phase) * 0.02;
+      pos[i3+1] += Math.sin(phase * 0.6 + 1.3) * 0.008;
+      pos[i3+2] += Math.cos(phase * 0.7) * 0.02;
+      if (this.ages[i] > this.maxAges[i] || Math.abs(pos[i3]) > 35 || Math.abs(pos[i3+2]) > 35) {
+        this.ages[i] = -1; pos[i3+1] = -100;
+      }
+    }
+    this.posAttr.needsUpdate = true;
+  }
+
+  dispose() {
+    this.geometry.dispose();
+    this.points.material.dispose();
+    this.scene.remove(this.points);
+  }
+}
+
+const T_SPORE_END       = 2;
+const T_GERM_END        = 3.5;
+const T_MUSHROOM_START  = 7;
+const T_HYPHAE_SLOWDOWN = 16;
+const T_MUSHROOM_FULL   = 20;
+
+function easeIO(t) { return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2; }
+
+function createLoader(container) {
+  const el = document.createElement('div');
+  el.style.cssText = `
+    position:absolute;inset:0;z-index:100;display:flex;flex-direction:column;
+    align-items:center;justify-content:center;background:#030308;
+    transition:opacity 1.2s ease;pointer-events:none;
+  `;
+  el.innerHTML = `
+    <svg width="48" height="48" viewBox="0 0 48 48" style="animation:spin 2.5s linear infinite">
+      <circle cx="24" cy="24" r="20" fill="none" stroke="rgba(40,100,255,0.15)" stroke-width="2"/>
+      <path d="M24 4a20 20 0 0 1 20 20" fill="none" stroke="rgba(60,140,255,0.7)" stroke-width="2" stroke-linecap="round"/>
+    </svg>
+    <div style="margin-top:22px;font:italic 14px/1 Georgia,serif;color:rgba(255,255,255,0.3);letter-spacing:1px;">
+      Psilocybe cubensis
+    </div>
+    <div style="margin-top:8px;font:10px/1 monospace;color:rgba(255,255,255,0.15);">
+      preparando germinación…
+    </div>
+    <style>@keyframes spin{to{transform:rotate(360deg)}}</style>
+  `;
+  container.appendChild(el);
+  return {
+    el,
+    hide() { el.style.opacity = '0'; setTimeout(() => el.remove(), 1400); },
+  };
+}
+
+function createWorld(container) {
+  let w = container.clientWidth  || window.innerWidth;
+  let h = container.clientHeight || window.innerHeight;
+  container.style.position = 'relative';
+  const loader = createLoader(container);
+
+  const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance' });
+  renderer.setSize(w, h);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.0;
+  container.appendChild(renderer.domElement);
+
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x030308);
+  scene.fog = new THREE.FogExp2(0x030308, 0.008);
+
+  const camera = new THREE.PerspectiveCamera(50, w / h, 0.1, 200);
+  camera.position.set(0, 4, 38);
+  camera.lookAt(0, -2, 0);
+
+  scene.add(new THREE.AmbientLight(0x665555, 0.8));
+  const hemiLight = new THREE.HemisphereLight(0xfffaf0, 0x334466, 0.8);
+  scene.add(hemiLight);
+
+  const bioLight = new THREE.PointLight(0x0055ff, 0, 80);
+  bioLight.position.set(0, -6, 0);
+  scene.add(bioLight);
+
+  const bioFill = new THREE.PointLight(0x3366cc, 0, 40);
+  bioFill.position.set(0, 2, 0);
+  scene.add(bioFill);
+
+  const capApexLight = new THREE.PointLight(0xffcc66, 0, 12, 1.5);
+  capApexLight.position.set(0, 12, 0);
+  scene.add(capApexLight);
+
+  const warmFill = new THREE.PointLight(0xffd0a0, 0, 30);
+  warmFill.position.set(0, 18, 0);
+  scene.add(warmFill);
+
+  const mushFillLight = new THREE.PointLight(0xffd0a0, 0, 25);
+  mushFillLight.position.set(-4, 8, -5);
+  scene.add(mushFillLight);
+
+  const mushRimLight = new THREE.PointLight(0xfff0e0, 0, 20);
+  mushRimLight.position.set(0, 10, -6);
+  scene.add(mushRimLight);
+
+  const bloomRes = new THREE.Vector2(Math.floor(w * 0.5), Math.floor(h * 0.5));
+  const composer = new EffectComposer(renderer);
+  composer.addPass(new RenderPass(scene, camera));
+  composer.addPass(new UnrealBloomPass(bloomRes, 0.9, 0.6, 0.35));
+  composer.addPass(new OutputPass());
+
+  const mycelium  = new Mycelium(scene);
+  const mushroom  = new Mushroom(scene);
+  mushroom.group.position.y = -0.3;
+  const particles = new Particles(scene);
+  const sporeRain = new SporeRain(scene);
+
+  const secondaryMushrooms = [
+    { m: new Mushroom(scene), offset: new THREE.Vector3(3.5, -0.3, 2.0),  delay: 3, scale: 0.55 },
+    { m: new Mushroom(scene), offset: new THREE.Vector3(-2.5, -0.3, 3.5), delay: 5, scale: 0.45 },
+    { m: new Mushroom(scene), offset: new THREE.Vector3(-3.0, -0.3, -2.0),delay: 7, scale: 0.35 },
+  ];
+  for (const sm of secondaryMushrooms) {
+    sm.m.group.position.copy(sm.offset);
+    sm.m.group.scale.setScalar(sm.scale);
+  }
+
+  const GERM_COUNT = 800;
+  const germPositions  = new Float32Array(GERM_COUNT * 3);
+  const germColors     = new Float32Array(GERM_COUNT * 3);
+  const germVelocities = new Float32Array(GERM_COUNT * 3);
+  for (let i = 0; i < GERM_COUNT; i++) {
+    const i3 = i * 3;
+    germPositions[i3] = 0; germPositions[i3+1] = 0; germPositions[i3+2] = 0;
+    const t = Math.random();
+    germColors[i3]   = 0.05 + t * 0.1;
+    germColors[i3+1] = 0.3  + t * 0.3;
+    germColors[i3+2] = 0.6  + t * 0.4;
+    const theta = Math.random() * Math.PI * 2;
+    const phi   = Math.acos(2 * Math.random() - 1);
+    const speed = 2.0 + Math.random() * 3.5;
+    germVelocities[i3]   = Math.sin(phi) * Math.cos(theta) * speed;
+    germVelocities[i3+1] = Math.sin(phi) * Math.sin(theta) * speed;
+    germVelocities[i3+2] = Math.cos(phi) * speed;
+  }
+  const germGeo = new THREE.BufferGeometry();
+  const germPosAttr = new THREE.BufferAttribute(germPositions, 3);
+  germPosAttr.setUsage(THREE.DynamicDrawUsage);
+  germGeo.setAttribute('position', germPosAttr);
+  germGeo.setAttribute('color', new THREE.BufferAttribute(germColors, 3));
+
+  const germSpriteTex = (() => {
+    const c = document.createElement('canvas'); c.width = 16; c.height = 16;
+    const cx = c.getContext('2d');
+    const g = cx.createRadialGradient(8,8,0,8,8,8);
+    g.addColorStop(0,   'rgba(255,255,255,1)');
+    g.addColorStop(0.4, 'rgba(255,255,255,0.5)');
+    g.addColorStop(1,   'rgba(255,255,255,0)');
+    cx.fillStyle = g; cx.fillRect(0,0,16,16);
+    return new THREE.CanvasTexture(c);
+  })();
+
+  const germMat = new THREE.PointsMaterial({
+    size: 0.12, map: germSpriteTex, vertexColors: true,
+    transparent: true, opacity: 0, depthWrite: false,
+    sizeAttenuation: true, blending: THREE.AdditiveBlending,
+  });
+  const germPoints = new THREE.Points(germGeo, germMat);
+  germPoints.visible = false;
+  scene.add(germPoints);
+
+  const germLight = new THREE.PointLight(0x3388ff, 0, 15);
+  germLight.position.set(0, 0, 0);
+  scene.add(germLight);
+  let germBurstStarted = false;
+
+  const label = document.createElement('div');
+  label.style.cssText = 'position:absolute;bottom:16px;left:16px;color:rgba(255,255,255,0.25);font:11px/1 monospace;pointer-events:none;z-index:1;letter-spacing:0.5px;';
+  container.appendChild(label);
+
+  const species = document.createElement('div');
+  species.style.cssText = 'position:absolute;bottom:16px;right:16px;color:rgba(255,255,255,0);font:italic 13px/1 Georgia,serif;pointer-events:none;z-index:1;transition:color 2s;';
+  species.textContent = 'Psilocybe cubensis';
+  container.appendChild(species);
+
+  const infoBox = document.createElement('div');
+  infoBox.style.cssText = 'position:absolute;top:20px;left:20px;max-width:280px;z-index:2;pointer-events:none;transition:opacity 1.5s ease;opacity:0;';
+  infoBox.innerHTML = `
+    <div style="font:italic 13px/1.2 Georgia,serif;color:rgba(255,255,255,0.35);margin-bottom:6px;" id="info-title"></div>
+    <div style="font:11px/1.5 monospace;color:rgba(255,255,255,0.2);" id="info-desc"></div>
+  `;
+  container.appendChild(infoBox);
+  const infoTitle = infoBox.querySelector('#info-title');
+  const infoDesc  = infoBox.querySelector('#info-desc');
+
+  const phaseInfo = {
+    germination: {
+      title: 'Germinación',
+      desc: 'La espora activa su metabolismo al detectar condiciones favorables en el sustrato. Enzimas rompen la pared celular, permitiendo la emergencia del tubo germinativo.',
+    },
+    mycelium: {
+      title: 'Red micelial',
+      desc: 'Las hifas se extienden radialmente colonizando el sustrato. El micelio secreta enzimas extracelulares que descomponen materia orgánica, absorbiendo nutrientes por osmotrofia.',
+    },
+    fruiting: {
+      title: 'Cuerpo fructífero',
+      desc: 'Primordios se forman donde las hifas se agregan. El estípite elonga por presión celular mientras el píleo se expande, protegiendo las láminas portadoras de basidios.',
+    },
+    mature: {
+      title: 'Esporulación',
+      desc: 'Los basidios en las láminas producen basidiosporas mediante meiosis. Las esporas caen por gravedad, dispersándose para colonizar nuevo sustrato. Ciclo completo.',
+    },
+  };
+
+  let currentInfoPhase = '';
+  function updateInfo(phase) {
+    if (phase === currentInfoPhase) return;
+    currentInfoPhase = phase;
+    const info = phaseInfo[phase];
+    if (info) {
+      infoBox.style.opacity = '1';
+      infoTitle.textContent = info.title;
+      infoDesc.textContent  = info.desc;
+    } else {
+      infoBox.style.opacity = '0';
+    }
+  }
+
+  const controls = new OrbitControls(camera, renderer.domElement);
+  controls.enableDamping   = true;
+  controls.dampingFactor   = 0.06;
+  controls.enablePan       = false;
+  controls.minDistance     = 10;
+  controls.maxDistance     = 60;
+  controls.maxPolarAngle   = Math.PI * 0.85;
+  controls.minPolarAngle   = Math.PI * 0.10;
+  controls.autoRotate      = true;
+  controls.autoRotateSpeed = 0.8;
+  controls.target.set(0, 0, 0);
+  renderer.domElement.addEventListener('contextmenu', (e) => e.stopImmediatePropagation(), true);
+  controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: null };
+
+  let userInteracting = false, interactTimeout = 0;
+  const onInteractStart = () => { userInteracting = true; controls.autoRotate = false; clearTimeout(interactTimeout); };
+  const onInteractEnd   = () => { interactTimeout = window.setTimeout(() => { userInteracting = false; controls.autoRotate = true; }, 3000); };
+  renderer.domElement.addEventListener('pointerdown', onInteractStart);
+  renderer.domElement.addEventListener('pointerup', onInteractEnd);
+  renderer.domElement.addEventListener('wheel', () => { onInteractStart(); onInteractEnd(); });
+
+  let elapsed = 0, running = true, lastTime = 0, sporeBurst = false, frameSkip = 0;
+
+  function warmUp() {
+    renderer.render(scene, camera);
+    renderer.render(scene, camera);
+    loader.hide();
+    lastTime = performance.now();
+    animate();
+  }
+
+  if ('requestIdleCallback' in window) {
+    requestIdleCallback(warmUp, { timeout: 300 });
+  } else {
+    setTimeout(warmUp, 200);
+  }
+
+  function animate() {
+    if (!running) return;
+    requestAnimationFrame(animate);
+
+    const now = performance.now();
+    const dt  = Math.min((now - lastTime) / 1000, 0.1);
+    lastTime  = now;
+    elapsed  += dt;
+
+    const introT    = Math.min(1, elapsed / 10);
+    const mushroomT = elapsed > T_MUSHROOM_START
+      ? Math.min(1, (elapsed - T_MUSHROOM_START) / (T_MUSHROOM_FULL - T_MUSHROOM_START))
+      : 0;
+
+    if (!userInteracting) {
+      const targetY    = THREE.MathUtils.lerp(-4, 0, easeIO(introT)) + easeIO(mushroomT) * 3;
+      const targetDist = THREE.MathUtils.lerp(38, 30, easeIO(introT)) + easeIO(mushroomT) * 5;
+      controls.target.y += (targetY - controls.target.y) * 0.02;
+      controls.minDistance = targetDist * 0.4;
+      controls.maxDistance = targetDist * 2.2;
+      const curDist = camera.position.distanceTo(controls.target);
+      if (Math.abs(curDist - targetDist) > 1) {
+        const dir = camera.position.clone().sub(controls.target).normalize();
+        const newDist = THREE.MathUtils.lerp(curDist, targetDist, 0.015);
+        camera.position.copy(dir.multiplyScalar(newDist).add(controls.target));
+      }
+    }
+    controls.update();
+
+    if (elapsed < T_GERM_END) {
+      if (!germBurstStarted && elapsed > 0.05) { germBurstStarted = true; germPoints.visible = true; }
+      if (germBurstStarted) {
+        const pos = germPosAttr.array;
+        const drag = 0.97;
+        for (let i = 0; i < GERM_COUNT; i++) {
+          const i3 = i * 3;
+          pos[i3]   += germVelocities[i3]   * dt;
+          pos[i3+1] += germVelocities[i3+1] * dt;
+          pos[i3+2] += germVelocities[i3+2] * dt;
+          germVelocities[i3]   *= drag;
+          germVelocities[i3+1] *= drag;
+          germVelocities[i3+2] *= drag;
+          germVelocities[i3+1] -= dt * 1.2;
+        }
+        germPosAttr.needsUpdate = true;
+        const pulseFreq = elapsed * Math.PI * 3;
+        const pulse   = Math.pow(Math.max(0, Math.sin(pulseFreq)), 2);
+        const fadeIn  = Math.min(1, elapsed / 0.3);
+        const fadeOut = elapsed > T_SPORE_END ? 1 - (elapsed - T_SPORE_END) / (T_GERM_END - T_SPORE_END) : 1;
+        germMat.opacity = fadeIn * fadeOut * (0.5 + pulse * 0.5);
+        germLight.intensity = fadeIn * fadeOut * (1 + pulse * 2);
+      }
+      if (!sporeBurst && elapsed > T_SPORE_END) { particles.burst(0, 0, 0); sporeBurst = true; }
+    } else {
+      germPoints.visible = false; germLight.intensity = 0;
+    }
+
+    if (elapsed > T_SPORE_END) {
+      if (!mycelium.started) mycelium.start();
+      const mycelAge = elapsed - T_SPORE_END;
+      const rampUp = Math.min(1, mycelAge / 4);
+      let intensity = rampUp * rampUp;
+      if (elapsed > T_HYPHAE_SLOWDOWN) intensity = Math.max(0.05, 1 - (elapsed - T_HYPHAE_SLOWDOWN) / 12);
+      mycelium.update(intensity, elapsed);
+      mycelium.setOpacity(Math.min(1, mycelAge / 2.5));
+
+      const maxReach = 18, cycleTime = 16, halfCycle = cycleTime / 2;
+      const cycleAge = mycelAge % cycleTime;
+      const waveT = cycleAge < halfCycle ? cycleAge / halfCycle : 1 - (cycleAge - halfCycle) / halfCycle;
+      const pulseRadius = waveT * maxReach;
+      const waveIntensity = mycelAge < cycleTime ? 1.0 : 0.35;
+      mycelium.setWavefront(pulseRadius, waveIntensity);
+    } else {
+      mycelium.setWavefront(-1, 0);
+    }
+
+    let mt = 0;
+    if (elapsed > T_MUSHROOM_START) {
+      mt = Math.min(1, (elapsed - T_MUSHROOM_START) / (T_MUSHROOM_FULL - T_MUSHROOM_START));
+      mushroom.setGrowth(easeIO(mt), elapsed);
+      const capY = 0.3 + mt * 9.7;
+      capApexLight.intensity = mt * mt * 3.5;
+      capApexLight.position.set(0, capY + 5, 0);
+      warmFill.intensity = mt * mt * 1.0;
+      warmFill.position.set(0, capY + 6, 0);
+      mushFillLight.intensity = mt * mt * 0.6;
+      mushRimLight.intensity  = mt * mt * 0.4;
+
+      for (const sm of secondaryMushrooms) {
+        const smElapsed = elapsed - T_MUSHROOM_START - sm.delay;
+        if (smElapsed > 0) {
+          const smDuration = (T_MUSHROOM_FULL - T_MUSHROOM_START) * 1.2;
+          const smt = Math.min(1, smElapsed / smDuration);
+          sm.m.setGrowth(easeIO(smt), elapsed);
+        }
+      }
+
+      if (mt > 0.95) {
+        if (!sporeRain.started) sporeRain.start();
+        const mainCapR  = 3.2 * easeIO(mt);
+        const mainStemH = -0.3 + easeIO(mt) * (8 + 2 * 0.55);
+        const sporeSources = [{ x: 0, z: 0, capR: mainCapR, stemH: mainStemH, scale: 1 }];
+        for (const sm of secondaryMushrooms) {
+          const smElapsed = elapsed - T_MUSHROOM_START - sm.delay;
+          if (smElapsed > 0) {
+            const smDuration = (T_MUSHROOM_FULL - T_MUSHROOM_START) * 1.2;
+            const smt = Math.min(1, smElapsed / smDuration);
+            if (smt > 0.9) {
+              const smCapR  = 3.2 * easeIO(smt) * sm.scale;
+              const smStemH = sm.offset.y + easeIO(smt) * (8 + 2 * 0.55) * sm.scale;
+              sporeSources.push({ x: sm.offset.x, z: sm.offset.z, capR: smCapR, stemH: smStemH, scale: sm.scale });
+            }
+          }
+        }
+        sporeRain.update(dt, sporeSources);
+      }
+    }
+
+    frameSkip++;
+    if (frameSkip % 2 === 0) particles.update(dt * 2, elapsed);
+
+    if (mycelium.started) {
+      const bioAge = Math.min(1, (elapsed - T_SPORE_END) / 14);
+      const ramp = bioAge * bioAge * bioAge;
+      bioLight.intensity = (1.6 + Math.sin(elapsed * 0.4) * 0.2) * ramp;
+      const nc = mycelium.getNodeCount();
+      bioFill.intensity = Math.min(1.0, nc * 0.00006) * ramp;
+      bioFill.position.y = 2 + mushroomT * 4;
+    }
+
+    if (elapsed < T_GERM_END) {
+      label.textContent = 'Germinación'; updateInfo('germination');
+    } else if (elapsed < T_MUSHROOM_START) {
+      label.textContent = 'Micelio'; updateInfo('mycelium');
+    } else if (elapsed < T_MUSHROOM_FULL) {
+      label.textContent = 'Fructificación'; updateInfo('fruiting');
+    } else {
+      label.textContent = 'Madurez'; updateInfo('mature');
+    }
+
+    if (elapsed > T_MUSHROOM_FULL) species.style.color = 'rgba(255,255,255,0.3)';
+
+    composer.render();
+  }
+
+  const onResize = () => {
+    w = container.clientWidth  || window.innerWidth;
+    h = container.clientHeight || window.innerHeight;
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+    renderer.setSize(w, h);
+    composer.setSize(w, h);
+  };
+  window.addEventListener('resize', onResize);
+
+  return {
+    dispose() {
+      running = false;
+      window.removeEventListener('resize', onResize);
+      renderer.domElement.removeEventListener('pointerdown', onInteractStart);
+      renderer.domElement.removeEventListener('pointerup', onInteractEnd);
+      clearTimeout(interactTimeout);
+      controls.dispose();
+      mycelium.dispose(); mushroom.dispose();
+      for (const sm of secondaryMushrooms) sm.m.dispose();
+      particles.dispose(); sporeRain.dispose();
+      germGeo.dispose(); germMat.dispose(); germSpriteTex.dispose();
+      scene.remove(germPoints);
+      renderer.dispose();
+      label.remove(); species.remove(); infoBox.remove();
+      if (container.contains(renderer.domElement)) container.removeChild(renderer.domElement);
+    },
+  };
+}
+
+createWorld(document.getElementById('app'));
+  </script>
+</body>
+</html>
