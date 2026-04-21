@@ -28,6 +28,10 @@ import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { OutputPass }      from 'three/addons/postprocessing/OutputPass.js';
 import { OrbitControls }   from 'three/addons/controls/OrbitControls.js';
 
+const _cores = navigator.hardwareConcurrency || 2;
+const _mem   = navigator.deviceMemory || 2;
+const LOW_END = _cores <= 4 || _mem <= 4;
+
 class Grid3D {
   constructor(cs) {
     this.cs = cs;
@@ -176,7 +180,7 @@ class Mycelium {
       this._refillAttractors();
     }
     if (this.activeAttractors > 0) {
-      const iters = Math.max(1, Math.round(ITERS_PER_FRAME * intensity));
+      const iters = Math.max(1, Math.round(ITERS_PER_FRAME * intensity * (LOW_END ? 0.5 : 1)));
       for (let i = 0; i < iters; i++) {
         if (this.activeAttractors <= 0) break;
         this._scaStep();
@@ -446,7 +450,7 @@ function makeBodyTexture() {
 }
 
 function makeBumpTexture() {
-  const W = 512, H = 1024;
+  const W = 256, H = 512;
   const c = document.createElement('canvas'); c.width = W; c.height = H;
   const ctx = c.getContext('2d');
   ctx.fillStyle = '#808080'; ctx.fillRect(0, 0, W, H);
@@ -477,6 +481,12 @@ function makeBumpTexture() {
   return tex;
 }
 
+let _sharedBodyTex = null, _sharedBumpTex = null;
+function getSharedTextures() {
+  if (!_sharedBodyTex) { _sharedBodyTex = makeBodyTexture(); _sharedBumpTex = makeBumpTexture(); }
+  return { bodyTex: _sharedBodyTex, bumpTex: _sharedBumpTex };
+}
+
 class Mushroom {
   constructor(scene) {
     this.scene = scene;
@@ -486,8 +496,9 @@ class Mushroom {
     this.group = new THREE.Group();
     this.group.visible = false;
     scene.add(this.group);
-    this.bodyTex = makeBodyTexture();
-    this.bumpTex = makeBumpTexture();
+    const shared = getSharedTextures();
+    this.bodyTex = shared.bodyTex;
+    this.bumpTex = shared.bumpTex;
   }
 
   setGrowth(t, time) {
@@ -502,7 +513,6 @@ class Mushroom {
   dispose() {
     this._clearMeshes(); this.bodyMat = null;
     this.scene.remove(this.group);
-    this.bodyTex.dispose(); this.bumpTex.dispose();
   }
 
   _rebuild(t) {
@@ -921,9 +931,13 @@ function createWorld(container) {
   container.style.position = 'relative';
   const loader = createLoader(container);
 
+  const cores = navigator.hardwareConcurrency || 2;
+  const mem   = navigator.deviceMemory || 2;
+  const lowEnd = LOW_END;
+
   const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance' });
   renderer.setSize(w, h);
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, lowEnd ? 1 : 1.5));
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.0;
   container.appendChild(renderer.domElement);
@@ -964,7 +978,8 @@ function createWorld(container) {
   mushRimLight.position.set(0, 10, -6);
   scene.add(mushRimLight);
 
-  const bloomRes = new THREE.Vector2(Math.floor(w * 0.5), Math.floor(h * 0.5));
+  const bloomScale = lowEnd ? 0.3 : 0.5;
+  const bloomRes = new THREE.Vector2(Math.floor(w * bloomScale), Math.floor(h * bloomScale));
   const composer = new EffectComposer(renderer);
   composer.addPass(new RenderPass(scene, camera));
   composer.addPass(new UnrealBloomPass(bloomRes, 0.9, 0.6, 0.35));
