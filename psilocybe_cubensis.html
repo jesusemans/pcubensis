@@ -1391,9 +1391,9 @@ function createWorld(container) {
       bioFill.position.y = 2 + mushroomT * 4;
     }
 
-    if (elapsed < T_GERM_END + 4) {
+    if (elapsed < T_GERM_END + 3.5) {
       updateInfo('germination');
-    } else if (elapsed < T_MUSHROOM_START + 6) {
+    } else if (elapsed < T_MUSHROOM_START + 7) {
       updateInfo('mycelium');
     } else if (elapsed < T_MUSHROOM_FULL) {
       updateInfo('fruiting');
