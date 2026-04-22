@@ -1063,9 +1063,9 @@ function createWorld(container) {
 
   const label = document.createElement('div');
   const cursorEl = document.getElementById('cursor');
-  document.addEventListener('mousemove', e => {
-    cursorEl.style.transform = `translate(${e.clientX}px,${e.clientY}px)`;
-  });
+  let _mx = window.innerWidth / 2, _my = window.innerHeight / 2;
+  let _cx = _mx, _cy = _my;
+  document.addEventListener('mousemove', e => { _mx = e.clientX; _my = e.clientY; });
 
   label.style.cssText = 'position:absolute;bottom:16px;left:16px;color:rgba(255,255,255,0.45);font:11px/1 monospace;pointer-events:none;z-index:1;letter-spacing:0.5px;';
   container.appendChild(label);
@@ -1120,7 +1120,8 @@ function createWorld(container) {
 
   const controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping   = true;
-  controls.dampingFactor   = 0.06;
+  controls.dampingFactor   = 0.04;
+  controls.zoomSpeed       = 0.4;
   controls.enablePan       = false;
   controls.minDistance     = 10;
   controls.maxDistance     = 60;
@@ -1163,6 +1164,10 @@ function createWorld(container) {
     const dt  = Math.min((now - lastTime) / 1000, 0.1);
     lastTime  = now;
     elapsed  += dt;
+
+    _cx += (_mx - _cx) * 0.12;
+    _cy += (_my - _cy) * 0.12;
+    cursorEl.style.transform = `translate(${_cx}px,${_cy}px)`;
 
     const introT    = Math.min(1, elapsed / 10);
     const mushroomT = elapsed > T_MUSHROOM_START
