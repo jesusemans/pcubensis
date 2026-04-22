@@ -6,8 +6,18 @@
   <title>Psilocybe cubensis — Ciclo de vida</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    html, body { width: 100%; height: 100%; overflow: hidden; background: #030308; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #030308; cursor: none; }
     #app { width: 100vw; height: 100vh; position: relative; }
+    #cursor {
+      position: fixed; top: 0; left: 0; pointer-events: none; z-index: 9999;
+      width: 18px; height: 18px; margin: -9px 0 0 -9px;
+      transform: translate(0,0);
+    }
+    #cursor::before, #cursor::after {
+      content: ''; position: absolute; background: rgba(255,255,255,0.35);
+    }
+    #cursor::before { left: 50%; top: 0; width: 1px; height: 100%; transform: translateX(-50%); }
+    #cursor::after  { top: 50%; left: 0; height: 1px; width: 100%; transform: translateY(-50%); }
   </style>
   <script type="importmap">
   {
@@ -19,6 +29,7 @@
   </script>
 </head>
 <body>
+  <div id="cursor"></div>
   <div id="app"></div>
   <script type="module">
 import * as THREE from 'three';
@@ -1051,7 +1062,12 @@ function createWorld(container) {
   let germBurstStarted = false;
 
   const label = document.createElement('div');
-  label.style.cssText = 'position:absolute;bottom:16px;left:16px;color:rgba(255,255,255,0.25);font:11px/1 monospace;pointer-events:none;z-index:1;letter-spacing:0.5px;';
+  const cursorEl = document.getElementById('cursor');
+  document.addEventListener('mousemove', e => {
+    cursorEl.style.transform = `translate(${e.clientX}px,${e.clientY}px)`;
+  });
+
+  label.style.cssText = 'position:absolute;bottom:16px;left:16px;color:rgba(255,255,255,0.45);font:11px/1 monospace;pointer-events:none;z-index:1;letter-spacing:0.5px;';
   container.appendChild(label);
 
   const species = document.createElement('div');
@@ -1062,8 +1078,8 @@ function createWorld(container) {
   const infoBox = document.createElement('div');
   infoBox.style.cssText = 'position:absolute;top:20px;left:20px;max-width:280px;z-index:2;pointer-events:none;transition:opacity 1.5s ease;opacity:0;';
   infoBox.innerHTML = `
-    <div style="font:italic 13px/1.2 Georgia,serif;color:rgba(255,255,255,0.35);margin-bottom:6px;" id="info-title"></div>
-    <div style="font:11px/1.5 monospace;color:rgba(255,255,255,0.2);" id="info-desc"></div>
+    <div style="font:italic 14px/1.3 Georgia,serif;color:rgba(255,255,255,0.6);margin-bottom:8px;letter-spacing:0.3px;" id="info-title"></div>
+    <div style="font:12px/1.65 monospace;color:rgba(255,255,255,0.38);" id="info-desc"></div>
   `;
   container.appendChild(infoBox);
   const infoTitle = infoBox.querySelector('#info-title');
