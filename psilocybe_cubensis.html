@@ -2,7 +2,7 @@
 <html lang="es">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>Psilocybe cubensis — Ciclo de vida</title>
   <link rel="icon" href="data:,">
   <style>
@@ -1132,7 +1132,7 @@ function createWorld(container) {
 
 
   const species = document.createElement('div');
-  species.style.cssText = 'position:absolute;bottom:16px;left:50%;transform:translateX(-50%);color:rgba(255,255,255,0.4);font:italic 13px/1 Georgia,serif;pointer-events:none;z-index:10;white-space:nowrap;';
+  species.style.cssText = 'position:absolute;bottom:calc(16px + env(safe-area-inset-bottom, 0px));left:50%;transform:translateX(-50%);color:rgba(255,255,255,0.4);font:italic 13px/1 Georgia,serif;pointer-events:none;z-index:10;white-space:nowrap;';
   species.textContent = 'Psilocybe cubensis';
   container.appendChild(species);
 
