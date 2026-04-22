@@ -603,16 +603,16 @@ class Mushroom {
       if (py <= stemH * 1.02) {
         const baseFade = stemH > 0.1 ? 1 - clamp(py / stemH, 0, 1) : 0;
         const baseColor = stipeAge * baseFade * baseFade;
-        vc[i*3]   = lerp(1.0,  0.78, baseColor * 0.7);
-        vc[i*3+1] = lerp(0.97, 0.42, baseColor * 0.7);
-        vc[i*3+2] = lerp(0.93, 0.12, baseColor * 0.7);
+        vc[i*3]   = lerp(0.96, 0.90, baseColor * 0.7);
+        vc[i*3+1] = lerp(0.88, 0.38, baseColor * 0.7);
+        vc[i*3+2] = lerp(0.72, 0.06, baseColor * 0.7);
       } else {
         const d = capR > 0.01 ? clamp(radial / capR, 0, 1) : 0;
         const edgeFade = d * d;
         const agingHere = colorAge * clamp(1.0 - edgeFade * 1.5, 0, 1);
-        vc[i*3]   = lerp(1.0,  0.78, agingHere);
-        vc[i*3+1] = lerp(0.97, 0.42, agingHere);
-        vc[i*3+2] = lerp(0.90, 0.12, agingHere);
+        vc[i*3]   = lerp(0.96, 0.90, agingHere);
+        vc[i*3+1] = lerp(0.88, 0.38, agingHere);
+        vc[i*3+2] = lerp(0.72, 0.06, agingHere);
       }
     }
     geo.setAttribute('color', new THREE.BufferAttribute(vc, 3));
