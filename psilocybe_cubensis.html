@@ -4,6 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Psilocybe cubensis — Ciclo de vida</title>
+  <link rel="icon" href="data:,">
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { width: 100%; height: 100%; overflow: hidden; background: #030308; cursor: none; }
@@ -811,6 +812,7 @@ class SporeRain {
     this.velocities = new Float32Array(SPORE_COUNT * 3);
     this.ages       = new Float32Array(SPORE_COUNT);
     this.maxAges    = new Float32Array(SPORE_COUNT);
+    this.spawnY     = new Float32Array(SPORE_COUNT);
 
     for (let i = 0; i < SPORE_COUNT; i++) {
       const i3 = i * 3;
@@ -862,6 +864,7 @@ class SporeRain {
           pos[i3]   = src.x + Math.cos(angle) * r;
           pos[i3+1] = src.stemH - 0.2 * src.scale;
           pos[i3+2] = src.z + Math.sin(angle) * r;
+          this.spawnY[i] = pos[i3+1];
           const spread = 0.15 + Math.random() * 0.4;
           this.velocities[i3]   = (Math.random() - 0.5) * spread;
           this.velocities[i3+1] = -(0.3 + Math.random() * 0.5);
@@ -877,6 +880,7 @@ class SporeRain {
       pos[i3]   += this.velocities[i3]   * dt * drag;
       pos[i3+1] += (this.velocities[i3+1] + buoyancy) * dt * drag;
       pos[i3+2] += this.velocities[i3+2] * dt * drag;
+      if (pos[i3+1] > this.spawnY[i]) pos[i3+1] = this.spawnY[i];
       const outward = Math.min(1, this.ages[i] / 2) * 0.02;
       const dist = Math.sqrt(pos[i3] * pos[i3] + pos[i3+2] * pos[i3+2]);
       if (dist > 0.1) {
@@ -1063,23 +1067,25 @@ function createWorld(container) {
 
   const label = document.createElement('div');
   const cursorEl = document.getElementById('cursor');
-  let _mx = window.innerWidth / 2, _my = window.innerHeight / 2;
-  let _cx = _mx, _cy = _my;
-  document.addEventListener('mousemove', e => { _mx = e.clientX; _my = e.clientY; });
+  cursorEl.style.opacity = '0';
+  let _mx = -999, _my = -999;
+  let _cx = -999, _cy = -999;
+  document.addEventListener('mousemove', e => {
+    if (_mx === -999) { _cx = e.clientX; _cy = e.clientY; cursorEl.style.opacity = '1'; }
+    _mx = e.clientX; _my = e.clientY;
+  });
 
-  label.style.cssText = 'position:absolute;bottom:16px;left:16px;color:rgba(255,255,255,0.45);font:11px/1 monospace;pointer-events:none;z-index:1;letter-spacing:0.5px;';
-  container.appendChild(label);
 
   const species = document.createElement('div');
-  species.style.cssText = 'position:absolute;bottom:16px;right:16px;color:rgba(255,255,255,0);font:italic 13px/1 Georgia,serif;pointer-events:none;z-index:1;transition:color 2s;';
+  species.style.cssText = 'position:absolute;bottom:16px;left:50%;transform:translateX(-50%);color:rgba(255,255,255,0.3);font:italic 13px/1 Georgia,serif;pointer-events:none;z-index:1;white-space:nowrap;';
   species.textContent = 'Psilocybe cubensis';
   container.appendChild(species);
 
   const infoBox = document.createElement('div');
-  infoBox.style.cssText = 'position:absolute;top:20px;left:20px;max-width:280px;z-index:2;pointer-events:none;transition:opacity 1.5s ease;opacity:0;';
+  infoBox.style.cssText = 'position:absolute;top:20px;left:50%;transform:translateX(-50%);width:320px;text-align:center;z-index:2;pointer-events:none;transition:opacity 1.5s ease;opacity:0;';
   infoBox.innerHTML = `
-    <div style="font:italic 14px/1.3 Georgia,serif;color:rgba(255,255,255,0.6);margin-bottom:8px;letter-spacing:0.3px;" id="info-title"></div>
-    <div style="font:12px/1.65 monospace;color:rgba(255,255,255,0.38);" id="info-desc"></div>
+    <div style="font:italic 12px/1.3 Georgia,serif;color:rgba(255,255,255,0.55);margin-bottom:6px;letter-spacing:0.3px;" id="info-title"></div>
+    <div style="font:10px/1.6 monospace;color:rgba(255,255,255,0.32);" id="info-desc"></div>
   `;
   container.appendChild(infoBox);
   const infoTitle = infoBox.querySelector('#info-title');
@@ -1144,17 +1150,20 @@ function createWorld(container) {
   let elapsed = 0, running = true, lastTime = 0, sporeBurst = false, frameSkip = 0;
 
   function warmUp() {
-    renderer.render(scene, camera);
-    renderer.render(scene, camera);
+    renderer.compile(scene, camera);
+    for (let i = 0; i < 8; i++) {
+      composer.render();
+    }
+    renderer.setAnimationLoop(null);
     loader.hide();
     lastTime = performance.now();
     animate();
   }
 
   if ('requestIdleCallback' in window) {
-    requestIdleCallback(warmUp, { timeout: 300 });
+    requestIdleCallback(warmUp, { timeout: 600 });
   } else {
-    setTimeout(warmUp, 200);
+    setTimeout(warmUp, 400);
   }
 
   function animate() {
@@ -1176,16 +1185,52 @@ function createWorld(container) {
       : 0;
 
     if (!userInteracting) {
-      const targetY    = THREE.MathUtils.lerp(-4, 0, easeIO(introT)) + easeIO(mushroomT) * 3;
-      const targetDist = THREE.MathUtils.lerp(38, 30, easeIO(introT)) + easeIO(mushroomT) * 5;
-      controls.target.y += (targetY - controls.target.y) * 0.02;
-      controls.minDistance = targetDist * 0.4;
-      controls.maxDistance = targetDist * 2.2;
-      const curDist = camera.position.distanceTo(controls.target);
-      if (Math.abs(curDist - targetDist) > 1) {
+      const cinematic = elapsed > T_MUSHROOM_FULL;
+      if (cinematic) {
+        const ct = (elapsed - T_MUSHROOM_FULL) % 60;
+        const p  = ct / 60;
+
+        const kf = (vals, t) => {
+          const n = vals.length - 1;
+          const i = Math.min(Math.floor(t * n), n - 1);
+          const f = t * n - i;
+          const s = f * f * (3 - 2 * f);
+          return vals[i] + (vals[i + 1] - vals[i]) * s;
+        };
+
+        const distKeys  = [35, 46, 30, 42, 35];
+        const polarKeys = [Math.PI * 0.12, Math.PI * 0.52, Math.PI * 0.62, Math.PI * 0.22, Math.PI * 0.12];
+
+        const targetDist  = kf(distKeys, p);
+        const polarTarget = kf(polarKeys, p);
+
+        const curDist = camera.position.distanceTo(controls.target);
         const dir = camera.position.clone().sub(controls.target).normalize();
-        const newDist = THREE.MathUtils.lerp(curDist, targetDist, 0.015);
+        const newDist = THREE.MathUtils.lerp(curDist, targetDist, 0.006);
         camera.position.copy(dir.multiplyScalar(newDist).add(controls.target));
+
+        const spherical = new THREE.Spherical().setFromVector3(
+          camera.position.clone().sub(controls.target)
+        );
+        spherical.phi = THREE.MathUtils.lerp(spherical.phi, polarTarget, 0.005);
+        spherical.phi = Math.max(controls.minPolarAngle, Math.min(controls.maxPolarAngle, spherical.phi));
+        camera.position.copy(new THREE.Vector3().setFromSpherical(spherical).add(controls.target));
+
+        controls.minDistance = 8;
+        controls.maxDistance = 60;
+        controls.target.y += (2 - controls.target.y) * 0.004;
+      } else {
+        const targetY    = THREE.MathUtils.lerp(-4, 0, easeIO(introT)) + easeIO(mushroomT) * 3;
+        const targetDist = THREE.MathUtils.lerp(38, 30, easeIO(introT)) + easeIO(mushroomT) * 5;
+        controls.target.y += (targetY - controls.target.y) * 0.02;
+        controls.minDistance = targetDist * 0.4;
+        controls.maxDistance = targetDist * 2.2;
+        const curDist = camera.position.distanceTo(controls.target);
+        if (Math.abs(curDist - targetDist) > 1) {
+          const dir = camera.position.clone().sub(controls.target).normalize();
+          const newDist = THREE.MathUtils.lerp(curDist, targetDist, 0.015);
+          camera.position.copy(dir.multiplyScalar(newDist).add(controls.target));
+        }
       }
     }
     controls.update();
@@ -1291,17 +1336,15 @@ function createWorld(container) {
       bioFill.position.y = 2 + mushroomT * 4;
     }
 
-    if (elapsed < T_GERM_END) {
-      label.textContent = 'Germinación'; updateInfo('germination');
-    } else if (elapsed < T_MUSHROOM_START) {
-      label.textContent = 'Micelio'; updateInfo('mycelium');
+    if (elapsed < T_GERM_END + 4) {
+      updateInfo('germination');
+    } else if (elapsed < T_MUSHROOM_START + 6) {
+      updateInfo('mycelium');
     } else if (elapsed < T_MUSHROOM_FULL) {
-      label.textContent = 'Fructificación'; updateInfo('fruiting');
+      updateInfo('fruiting');
     } else {
-      label.textContent = 'Madurez'; updateInfo('mature');
+      updateInfo('mature');
     }
-
-    if (elapsed > T_MUSHROOM_FULL) species.style.color = 'rgba(255,255,255,0.3)';
 
     composer.render();
   }
@@ -1330,7 +1373,7 @@ function createWorld(container) {
       germGeo.dispose(); germMat.dispose(); germSpriteTex.dispose();
       scene.remove(germPoints);
       renderer.dispose();
-      label.remove(); species.remove(); infoBox.remove();
+      species.remove(); infoBox.remove();
       if (container.contains(renderer.domElement)) container.removeChild(renderer.domElement);
     },
   };
